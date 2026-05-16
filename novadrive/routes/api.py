@@ -23,6 +23,8 @@ from novadrive.services.file_delivery import FileDeliveryService
 from novadrive.services.file_service import AccessError, FileService
 from novadrive.services.overlay_service import OverlayService
 from novadrive.services.share_service import ShareService
+from novadrive.services.storage_base import StorageBackendError
+from novadrive.utils.chunking import ChunkValidationError
 from novadrive.utils.urls import external_url
 from novadrive.utils.validators import ValidationError
 
@@ -169,12 +171,29 @@ def media_raw(file_id: int, filename: str | None = None):
     if _media_kind(file_record) not in MEDIA_KINDS:
         return _api_error("Only image, video, and audio files can be served by this media endpoint.", 415)
 
-    response = FileDeliveryService.build_response(
-        file_record,
-        current_app.config,
-        as_attachment=False,
-        download_name=file_record.filename,
-    )
+    try:
+        response = FileDeliveryService.build_response(
+            file_record,
+            current_app.config,
+            as_attachment=False,
+            download_name=file_record.filename,
+        )
+    except StorageBackendError:
+        current_app.logger.exception(
+            "Media rebuild failed because the configured storage backend could not fetch a chunk. file_id=%s",
+            file_record.id,
+        )
+        return _api_error(
+            "Media could not be rebuilt from storage. Check the storage backend or Discord bridge logs.",
+            502,
+        )
+    except (ChunkValidationError, ValidationError):
+        current_app.logger.exception("Media manifest validation failed. file_id=%s", file_record.id)
+        return _api_error("Media manifest validation failed for this file.", 422)
+    except Exception:
+        current_app.logger.exception("Media response failed unexpectedly. file_id=%s", file_record.id)
+        return _api_error("Media response failed unexpectedly.", 500)
+
     response.headers["Access-Control-Allow-Origin"] = "*"
     return response
 
