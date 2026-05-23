@@ -99,27 +99,50 @@ class FileService:
         return list(reversed(breadcrumbs))
 
     @staticmethod
+    def _load_folder_map(
+        user: User,
+        owner: User | None = None,
+        shared_drive: SharedDrive | None = None,
+    ) -> tuple[Folder, dict[int, list[Folder]]]:
+        root = FileService.get_accessible_root_folder(user, owner=owner, shared_drive=shared_drive)
+        folders_query = Folder.query.filter(Folder.deleted_at.is_(None))
+
+        if shared_drive is not None:
+            folders_query = folders_query.filter(Folder.shared_drive_id == shared_drive.id)
+        else:
+            target_owner = owner or user
+            folders_query = folders_query.filter(
+                Folder.shared_drive_id.is_(None),
+                Folder.owner_id == target_owner.id,
+            )
+
+        folders = folders_query.order_by(Folder.parent_id.asc(), Folder.name.asc()).all()
+        children_by_parent_id: dict[int, list[Folder]] = {}
+        for folder in folders:
+            parent_id = folder.parent_id if folder.parent_id is not None else 0
+            children_by_parent_id.setdefault(parent_id, []).append(folder)
+
+        return root, children_by_parent_id
+
+    @staticmethod
     def folder_options(
         user: User,
         exclude_folder_id: int | None = None,
         owner: User | None = None,
         shared_drive: SharedDrive | None = None,
     ) -> list[tuple[int, str]]:
-        root = FileService.get_accessible_root_folder(user, owner=owner, shared_drive=shared_drive)
+        root, children_by_parent_id = FileService._load_folder_map(
+            user,
+            owner=owner,
+            shared_drive=shared_drive,
+        )
         options: list[tuple[int, str]] = []
 
         def walk(node: Folder, depth: int) -> None:
-            if node.deleted_at is not None:
-                return
             if node.id != exclude_folder_id:
                 prefix = "  " * depth
                 options.append((node.id, f"{prefix}{node.name}"))
-            children = (
-                Folder.query.filter_by(parent_id=node.id, deleted_at=None)
-                .order_by(Folder.name.asc())
-                .all()
-            )
-            for child in children:
+            for child in children_by_parent_id.get(node.id, []):
                 walk(child, depth + 1)
 
         walk(root, 0)
@@ -131,17 +154,16 @@ class FileService:
         owner: User | None = None,
         shared_drive: SharedDrive | None = None,
     ) -> list[dict]:
-        root = FileService.get_accessible_root_folder(user, owner=owner, shared_drive=shared_drive)
+        root, children_by_parent_id = FileService._load_folder_map(
+            user,
+            owner=owner,
+            shared_drive=shared_drive,
+        )
 
         def build(node: Folder) -> dict:
-            children = (
-                Folder.query.filter_by(parent_id=node.id, deleted_at=None)
-                .order_by(Folder.name.asc())
-                .all()
-            )
             return {
                 "folder": node,
-                "children": [build(child) for child in children],
+                "children": [build(child) for child in children_by_parent_id.get(node.id, [])],
             }
 
         return [build(root)]
